@@ -1,0 +1,70 @@
+# 매달 한국 OSM 원본에서 달리기 코스 후보를 뽑아 GitHub Pages로 내보낸다.
+name: update course data
+
+on:
+  schedule:
+    - cron: "0 18 1 * *" # 매달 2일 03:00 (한국 시간)
+  workflow_dispatch:
+
+permissions:
+  contents: write # 갱신 기록(last-update.json)을 남겨 예약 실행이 꺼지지 않게 한다
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install osmium
+        run: pip install osmium
+
+      - name: Download South Korea extract
+        # "latest"가 아직 올라오지 않은 오늘 파일을 가리킬 때가 있어서 최근 날짜 파일을 차례로 시도한다.
+        run: |
+          for n in 0 1 2 3 4 5 6; do
+            d=$(date -u -d "-$n day" +%y%m%d)
+            url="https://download.geofabrik.de/asia/south-korea/south-korea-$d.osm.pbf"
+            if curl -sfL -o korea.osm.pbf "$url"; then
+              echo "downloaded $url"
+              echo "SOURCE_DATE=$d" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+          test -s korea.osm.pbf
+          test "$(stat -c %s korea.osm.pbf)" -gt 100000000
+
+      - name: Extract tiles
+        run: |
+          python scripts/extract.py korea.osm.pbf site/v1 0.1
+          cp README.md site/index.md
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Record update
+        run: |
+          cp site/v1/meta.json last-update.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-update.json
+          git commit -m "data: $SOURCE_DATE" || echo "no change"
+          git push
